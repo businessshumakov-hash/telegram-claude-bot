@@ -2,8 +2,8 @@ require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const Anthropic = require('@anthropic-ai/sdk');
 const https = require('https');
-const fs   = require('fs');
 const path = require('path');
+const { Pool } = require('pg');
 
 // ─── Validate environment variables ──────────────────────────────────────────
 
@@ -15,6 +15,10 @@ if (!process.env.ANTHROPIC_API_KEY) {
   console.error('Помилка: ANTHROPIC_API_KEY не задано у .env файлі');
   process.exit(1);
 }
+if (!process.env.DATABASE_URL) {
+  console.error('Помилка: DATABASE_URL не задано у .env файлі');
+  process.exit(1);
+}
 if (!process.env.TAVILY_API_KEY)    console.warn('Попередження: TAVILY_API_KEY не задано — веб-пошук вимкнено');
 if (!process.env.CLICKUP_API_KEY)   console.warn('Попередження: CLICKUP_API_KEY не задано — ClickUp вимкнено');
 if (!process.env.OPENAI_API_KEY)     console.warn('Попередження: OPENAI_API_KEY не задано — розпізнавання голосу вимкнено');
@@ -23,6 +27,7 @@ if (!process.env.TELEGRAM_USER_ID)  console.warn('Попередження: TELE
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // Conversation history stored per user: Map<userId, MessageParam[]>
 const conversationHistory = new Map();
@@ -61,25 +66,44 @@ const BASE_SYSTEM_PROMPT = `Ти — Мія, особистий AI-асисте�
 
 Для ClickUp — використовуй інструменти щоразу, коли Богдан питає про задачі, хоче щось створити або відмітити виконаним. Не вигадуй дані — завжди бери реальні дані через інструменти.`;
 
-// ─── Persistent memory ────────────────────────────────────────────────────────
+// ─── Persistent memory (PostgreSQL) ──────────────────────────────────────────
 
-const MEMORY_FILE = path.join(__dirname, 'memory.json');
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bot_memory (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      facts JSONB NOT NULL DEFAULT '[]',
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(
+    `INSERT INTO bot_memory (id, facts) VALUES (1, '[]') ON CONFLICT (id) DO NOTHING`
+  );
+  console.log('✅ База даних підключена');
+}
 
-function loadMemory() {
+async function loadMemory() {
   try {
-    return JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
+    const res = await pool.query('SELECT facts, updated_at FROM bot_memory WHERE id = 1');
+    if (!res.rows.length) return { facts: [] };
+    return { facts: res.rows[0].facts ?? [], updatedAt: res.rows[0].updated_at };
   } catch {
     return { facts: [] };
   }
 }
 
-function saveMemory(memory) {
-  memory.updatedAt = new Date().toISOString();
-  fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2), 'utf8');
+async function saveMemory(memory) {
+  const now = new Date().toISOString();
+  memory.updatedAt = now;
+  await pool.query(
+    `INSERT INTO bot_memory (id, facts, updated_at) VALUES (1, $1::jsonb, $2)
+     ON CONFLICT (id) DO UPDATE SET facts = $1::jsonb, updated_at = $2`,
+    [JSON.stringify(memory.facts), now]
+  );
 }
 
 // Returns the full system prompt with current memory appended
-function buildSystemPrompt() {
+async function buildSystemPrompt() {
   const now = new Date().toLocaleString('uk-UA', {
     timeZone: 'Europe/Kyiv',
     weekday: 'long',
@@ -91,7 +115,7 @@ function buildSystemPrompt() {
   });
   const timestamp = `Зараз: ${now} (Київ)`;
 
-  const { facts = [] } = loadMemory();
+  const { facts = [] } = await loadMemory();
   const memoryBlock = facts.length
     ? '\n\nЩо Мія пам\'ятає про Богдана (збережено автоматично):\n' +
       facts.map((f, i) => `${i + 1}. ${f}`).join('\n')
@@ -113,7 +137,7 @@ async function autoSaveConversationSummary() {
     .slice(-20);
   if (!textTurns.length) return;
 
-  const { facts = [] } = loadMemory();
+  const { facts = [] } = await loadMemory();
   const dialog = textTurns
     .map(m => `${m.role === 'user' ? 'Богдан' : 'Мія'}: ${m.content}`)
     .join('\n');
@@ -144,9 +168,9 @@ ${dialog}
     if (!match) return;
     const newFacts = JSON.parse(match[0]);
     if (!Array.isArray(newFacts) || !newFacts.length) return;
-    const memory = loadMemory();
+    const memory = await loadMemory();
     memory.facts = [...(memory.facts ?? []), ...newFacts];
-    saveMemory(memory);
+    await saveMemory(memory);
     console.log(`🧠 Авто-збереження: +${newFacts.length} фактів`);
   } catch (err) {
     console.error('Помилка авто-збереження пам\'яті:', err.message);
@@ -160,7 +184,7 @@ let memoryReviewPending = false;
 
 async function sendMemoryReview() {
   if (!OWNER_ID) return;
-  const { facts = [] } = loadMemory();
+  const { facts = [] } = await loadMemory();
 
   if (!facts.length) {
     await bot.telegram.sendMessage(OWNER_ID,
@@ -182,7 +206,7 @@ async function sendMemoryReview() {
 
 async function handleMemoryReviewResponse(ctx, input) {
   const text = input.trim().toLowerCase();
-  const memory = loadMemory();
+  const memory = await loadMemory();
 
   if (text === 'ok' || text === 'ок') {
     await ctx.reply('👍 Залишаю все як є.');
@@ -191,7 +215,7 @@ async function handleMemoryReviewResponse(ctx, input) {
 
   if (text === 'all' || text === 'все') {
     memory.facts = [];
-    saveMemory(memory);
+    await saveMemory(memory);
     await ctx.reply('🗑 Пам\'ять повністю очищена.');
     return;
   }
@@ -214,7 +238,7 @@ async function handleMemoryReviewResponse(ctx, input) {
   // Remove in descending order so indices stay valid
   const removed = [];
   nums.sort((a, b) => b - a).forEach(n => removed.push(memory.facts.splice(n - 1, 1)[0]));
-  saveMemory(memory);
+  await saveMemory(memory);
 
   await ctx.reply(
     `🗑 Видалено ${removed.length} факт(ів):\n` +
@@ -222,10 +246,10 @@ async function handleMemoryReviewResponse(ctx, input) {
   );
 }
 
-// Extract new facts from the last exchange and append them to memory.json.
+// Extract new facts from the last exchange and save to PostgreSQL.
 // Uses Haiku for speed/cost. Called fire-and-forget — never blocks the reply.
 async function extractAndSaveMemory(userMessage, assistantMessage) {
-  const { facts = [] } = loadMemory();
+  const { facts = [] } = await loadMemory();
 
   const prompt = `Проаналізуй цей діалог і визнач, чи з'явились нові конкретні факти про Богдана, які варто запам'ятати надовго.
 
@@ -258,9 +282,9 @@ ${facts.length ? facts.map(f => `- ${f}`).join('\n') : '(нічого)'}
     const newFacts = JSON.parse(match[0]);
     if (!Array.isArray(newFacts) || !newFacts.length) return;
 
-    const memory = loadMemory();
+    const memory = await loadMemory();
     memory.facts = [...(memory.facts ?? []), ...newFacts];
-    saveMemory(memory);
+    await saveMemory(memory);
     console.log(`🧠 Збережено ${newFacts.length} нових фактів:`, newFacts);
   } catch (err) {
     console.error('Помилка пам\'яті:', err.message);
@@ -935,7 +959,7 @@ async function processWithClaude(history, onToolUse) {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 4096,
-      system: buildSystemPrompt(),
+      system: await buildSystemPrompt(),
       ...(tools.length ? { tools } : {}),
       messages: apiMessages,
     });
@@ -1078,7 +1102,7 @@ bot.command('testdigest', async (ctx) => {
 
 // /memory — show all remembered facts
 bot.command('memory', async (ctx) => {
-  const { facts = [], updatedAt } = loadMemory();
+  const { facts = [], updatedAt } = await loadMemory();
   if (!facts.length) {
     await ctx.reply('🧠 Пам\'ять порожня — ще нічого не збережено.');
     return;
@@ -1096,17 +1120,17 @@ bot.command('memory', async (ctx) => {
 });
 
 // /forget [number|keyword|all] — remove specific fact(s) or clear all
-bot.command('forget', (ctx) => {
+bot.command('forget', async (ctx) => {
   const arg = ctx.message.text.split(' ').slice(1).join(' ').trim();
-  const memory = loadMemory();
+  const memory = await loadMemory();
 
   if (!memory.facts?.length) {
-    ctx.reply('🧠 Пам\'ять вже порожня.');
+    await ctx.reply('🧠 Пам\'ять вже порожня.');
     return;
   }
 
   if (!arg) {
-    ctx.reply(
+    await ctx.reply(
       '❓ Вкажи що забути:\n' +
       '/forget all — очистити всю пам\'ять\n' +
       '/forget 3 — видалити факт №3\n' +
@@ -1117,16 +1141,16 @@ bot.command('forget', (ctx) => {
 
   if (arg.toLowerCase() === 'all' || arg.toLowerCase() === 'все') {
     memory.facts = [];
-    saveMemory(memory);
-    ctx.reply('🗑 Пам\'ять повністю очищено.');
+    await saveMemory(memory);
+    await ctx.reply('🗑 Пам\'ять повністю очищено.');
     return;
   }
 
   const num = parseInt(arg, 10);
   if (!isNaN(num) && num >= 1 && num <= memory.facts.length) {
     const removed = memory.facts.splice(num - 1, 1)[0];
-    saveMemory(memory);
-    ctx.reply(`🗑 Видалено факт №${num}:\n"${removed}"`);
+    await saveMemory(memory);
+    await ctx.reply(`🗑 Видалено факт №${num}:\n"${removed}"`);
     return;
   }
 
@@ -1136,11 +1160,11 @@ bot.command('forget', (ctx) => {
   memory.facts = memory.facts.filter(f => !f.toLowerCase().includes(keyword));
   const removed = before - memory.facts.length;
   if (removed === 0) {
-    ctx.reply(`🔍 Фактів зі словом "${arg}" не знайдено.`);
+    await ctx.reply(`🔍 Фактів зі словом "${arg}" не знайдено.`);
     return;
   }
-  saveMemory(memory);
-  ctx.reply(`🗑 Видалено ${removed} факт(ів) зі словом "${arg}".`);
+  await saveMemory(memory);
+  await ctx.reply(`🗑 Видалено ${removed} факт(ів) зі словом "${arg}".`);
 });
 
 bot.command('clear', (ctx) => {
@@ -1294,17 +1318,20 @@ bot.on('message', (ctx) => {
 
 // ─── Launch ───────────────────────────────────────────────────────────────────
 
-bot.launch().then(() => {
+initDb().then(() => bot.launch()).then(async () => {
   console.log('✅ Telegram-бот запущено!');
   console.log(`🔍 Веб-пошук (Tavily):     ${process.env.TAVILY_API_KEY  ? 'увімкнено' : 'вимкнено'}`);
   console.log(`📋 ClickUp:                ${process.env.CLICKUP_API_KEY ? 'увімкнено' : 'вимкнено'}`);
   console.log(`🎙 Whisper STT (OpenAI):    ${process.env.OPENAI_API_KEY     ? 'увімкнено' : 'вимкнено'}`);
   console.log(`🔊 ElevenLabs TTS (Anika):  ${process.env.ELEVENLABS_API_KEY ? 'увімкнено' : 'вимкнено'}`);
   console.log(`👤 Власник (дайджести):     ${OWNER_ID ? `ID ${OWNER_ID}` : 'не задано'}`);
-  const { facts = [] } = loadMemory();
-  console.log(`🧠 Пам'ять:                 ${facts.length} фактів (${MEMORY_FILE})`);
+  const { facts = [] } = await loadMemory();
+  console.log(`🧠 Пам'ять:                 ${facts.length} фактів (PostgreSQL)`);
   console.log('Натисніть Ctrl+C для зупинки.');
   startScheduler();
+}).catch(err => {
+  console.error('Помилка запуску:', err.message);
+  process.exit(1);
 });
 
 process.once('SIGINT',  () => bot.stop('SIGINT'));
