@@ -27,7 +27,12 @@ if (!process.env.TELEGRAM_USER_ID)  console.warn('Попередження: TELE
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL ?? '')
+    ? false
+    : { rejectUnauthorized: false },
+});
 
 // Conversation history stored per user: Map<userId, MessageParam[]>
 const conversationHistory = new Map();
@@ -124,7 +129,8 @@ async function loadMemory() {
       ? { ...emptyCategories(), facts: data }
       : { ...emptyCategories(), ...data };
     return { categories, updatedAt: res.rows[0].updated_at };
-  } catch {
+  } catch (err) {
+    console.error('🧠 loadMemory помилка:', err.message);
     return { categories: emptyCategories(), updatedAt: null };
   }
 }
@@ -404,13 +410,14 @@ async function handleMemoryReviewResponse(ctx, input) {
 // Extract new facts from the last exchange and save to PostgreSQL.
 // Uses Haiku for speed/cost. Called fire-and-forget — never blocks the reply.
 async function extractAndSaveMemory(userMessage, assistantMessage) {
-  const { categories } = await loadMemory();
-  const knownFacts = CATEGORIES
-    .flatMap(cat => (categories[cat] ?? []).map(f => `[${CAT_LABELS[cat]}] ${f}`))
-    .map(f => `- ${f}`)
-    .join('\n') || '(нічого)';
+  try {
+    const { categories } = await loadMemory();
+    const knownFacts = CATEGORIES
+      .flatMap(cat => (categories[cat] ?? []).map(f => `[${CAT_LABELS[cat]}] ${f}`))
+      .map(f => `- ${f}`)
+      .join('\n') || '(нічого)';
 
-  const prompt = `Ти — система пам'яті асистента Міі. Твоє завдання: АГРЕСИВНО зберігати особисту інформацію про Богдана з кожного діалогу.
+    const prompt = `Ти — система пам'яті асистента Міі. Твоє завдання: АГРЕСИВНО зберігати особисту інформацію про Богдана з кожного діалогу.
 
 Вже відомо:
 ${knownFacts}
@@ -447,7 +454,6 @@ ${knownFacts}
 Якщо нічого нового — поверни {"clients":[],"habits":[],"plans":[],"facts":[]}
 Відповідай ТІЛЬКИ JSON: {"clients":[],"habits":[],"plans":[],"facts":[]}`;
 
-  try {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 512,
@@ -456,16 +462,22 @@ ${knownFacts}
 
     const raw = response.content[0]?.text?.trim() ?? '{}';
     const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) return;
+    if (!match) {
+      console.warn('🧠 Екстракція: не вдалося розібрати відповідь:', raw.slice(0, 100));
+      return;
+    }
 
     const newFacts = JSON.parse(match[0]);
     const total = CATEGORIES.reduce((s, c) => s + (newFacts[c]?.length ?? 0), 0);
-    if (!total) return;
+    if (!total) {
+      console.log('🧠 Екстракція: нових фактів не знайдено');
+      return;
+    }
 
     await mergeAndSaveFacts(newFacts);
-    console.log(`🧠 Збережено ${total} нових фактів:`, newFacts);
+    console.log(`🧠 Збережено ${total} нових фактів:`, JSON.stringify(newFacts));
   } catch (err) {
-    console.error('Помилка пам\'яті:', err.message);
+    console.error('🧠 extractAndSaveMemory помилка:', err.message);
   }
 }
 
@@ -1299,7 +1311,9 @@ async function handleMessage(ctx, userMessage, useVoice = false) {
     await sendReply(ctx, assistantMessage, useVoice);
 
     // Extract and save any new facts in the background (never blocks the reply)
-    extractAndSaveMemory(userMessage, assistantMessage).catch(() => {});
+    extractAndSaveMemory(userMessage, assistantMessage).catch(err =>
+      console.error('🧠 extractAndSaveMemory помилка:', err.message)
+    );
   } catch (error) {
     history.pop();
     console.error('Помилка API:', error.message);
@@ -1586,7 +1600,9 @@ bot.on('photo', async (ctx) => {
     await sendReply(ctx, assistantMessage, false);
 
     // Pass caption (or placeholder) to memory extraction
-    extractAndSaveMemory(caption || '[фото без підпису]', assistantMessage).catch(() => {});
+    extractAndSaveMemory(caption || '[фото без підпису]', assistantMessage).catch(err =>
+      console.error('🧠 extractAndSaveMemory помилка:', err.message)
+    );
   } catch (error) {
     history.pop();
     console.error('Помилка аналізу фото:', error.message);
