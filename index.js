@@ -825,6 +825,88 @@ let lastMorningDate      = '';
 let lastEveningDate      = '';
 let lastMemoryReviewDate = '';
 
+// ─── Proactive messages ───────────────────────────────────────────────────────
+
+let lastProactiveTime     = 0;   // Date.now() of last sent proactive message
+let proactiveScheduleDate = '';  // 'YYYY-MM-DD' for which proactiveTimes was built
+let proactiveTimes        = [];  // sorted minute-of-day values to fire today
+let nextProactiveType     = 'personal'; // alternates 'task' | 'personal'
+
+// Returns 2-3 random minute-of-day values between 08:00 and 21:00, each at
+// least 120 minutes apart from each other.
+function scheduleTodayProactiveMessages() {
+  const count    = Math.random() < 0.5 ? 2 : 3;
+  const DAY_START = 8  * 60;  // 480 min
+  const DAY_END   = 21 * 60;  // 1260 min
+  const MIN_GAP   = 120;
+
+  const times = [];
+  let attempts = 0;
+  while (times.length < count && attempts < 300) {
+    attempts++;
+    const t = DAY_START + Math.floor(Math.random() * (DAY_END - DAY_START));
+    if (times.every(e => Math.abs(e - t) >= MIN_GAP)) times.push(t);
+  }
+  return times.sort((a, b) => a - b);
+}
+
+async function sendProactiveMessage(type) {
+  if (!OWNER_ID) return;
+
+  const { facts = [] } = await loadMemory();
+  const knownFacts = facts.length
+    ? facts.map(f => `- ${f}`).join('\n')
+    : '(нічого)';
+
+  let prompt;
+  if (type === 'task' && process.env.CLICKUP_API_KEY) {
+    let taskContext = '';
+    try {
+      taskContext = await executeTool('clickup_get_tasks', { filter: 'today' });
+    } catch { /* ClickUp unavailable — send generic check-in */ }
+
+    prompt = `Ти — Мія, AI-асистент Богдана. Напиши одне коротке природне повідомлення про задачі — як від друга, без формалізму.
+${taskContext ? `\nЗадачі на сьогодні:\n${taskContext}` : '\nСписок задач зараз недоступний — запитай загально.'}
+
+Що відомо про Богдана:
+${knownFacts}
+
+Правила:
+- Максимум 1-2 речення
+- Запитай про прогрес по конкретній задачі або м'яко нагадай про щось незроблене
+- Природно, неформально
+- Тільки текст повідомлення, без жодних пояснень`;
+  } else {
+    prompt = `Ти — Мія, AI-асистент Богдана. Придумай одне коротке особисте запитання, щоб краще пізнати Богдана.
+
+Що вже відомо:
+${knownFacts}
+
+Правила:
+- Запитуй про щось чого ще НЕ знаєш — не дублюй вже відоме
+- Теми: звички, вподобання, думки, спогади, плани, цікаві ситуації з життя
+- Максимум 1-2 речення, природно і невимушено
+- Тільки текст запитання, без жодних пояснень`;
+  }
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 150,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const message = resp.content[0]?.text?.trim();
+    if (!message) return;
+
+    await bot.telegram.sendMessage(OWNER_ID, message);
+    lastProactiveTime = Date.now();
+    nextProactiveType = type === 'task' ? 'personal' : 'task';
+    console.log(`💬 Проактивне (${type}): "${message}"`);
+  } catch (err) {
+    console.error('Помилка проактивного повідомлення:', err.message);
+  }
+}
+
 function startScheduler() {
   if (!OWNER_ID) {
     console.log('⏰ Планувальник вимкнено (TELEGRAM_USER_ID не задано)');
@@ -848,6 +930,27 @@ function startScheduler() {
       lastMemoryReviewDate = today;
       await sendMemoryReview();
     }
+
+    // Rebuild proactive schedule at day rollover (or first tick)
+    if (proactiveScheduleDate !== today) {
+      proactiveScheduleDate = today;
+      proactiveTimes = scheduleTodayProactiveMessages();
+      const fmt = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+      console.log(`💬 Проактивні повідомлення сьогодні: ${proactiveTimes.map(fmt).join(', ')}`);
+    }
+
+    // Fire a proactive message if the current minute is scheduled and
+    // at least 2 hours have passed since the last one
+    const currentMinute = hour * 60 + minute;
+    const TWO_HOURS_MS  = 2 * 60 * 60 * 1000;
+    if (
+      hour >= 8 && hour < 21 &&
+      proactiveTimes.includes(currentMinute) &&
+      Date.now() - lastProactiveTime >= TWO_HOURS_MS
+    ) {
+      proactiveTimes = proactiveTimes.filter(t => t !== currentMinute);
+      sendProactiveMessage(nextProactiveType).catch(() => {});
+    }
   }, 60_000);
 
   // 60-minute auto-save of conversation summary
@@ -855,7 +958,7 @@ function startScheduler() {
     await autoSaveConversationSummary();
   }, 60 * 60_000);
 
-  console.log('⏰ Планувальник запущено — дайджести 08:00/21:00, огляд пам\'яті 22:00 за Києвом');
+  console.log('⏰ Планувальник запущено — дайджести 08:00/21:00, огляд пам\'яті 22:00, проактивні 2-3/день за Києвом');
   console.log('⏰ Авто-збереження пам\'яті кожні 60 хвилин');
 }
 
