@@ -3,7 +3,38 @@ const { Telegraf } = require('telegraf');
 const Anthropic = require('@anthropic-ai/sdk');
 const https = require('https');
 const path = require('path');
+const fs = require('fs');
 const { Pool } = require('pg');
+
+// ─── Single-instance lock (PID file) ─────────────────────────────────────────
+
+const PID_FILE = path.join(__dirname, 'bot.pid');
+
+function acquireLock() {
+  if (fs.existsSync(PID_FILE)) {
+    const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    let running = false;
+    try {
+      process.kill(oldPid, 0); // signal 0 = existence check only
+      running = true;
+    } catch (_) {
+      // process not found — stale lock
+    }
+    if (running) {
+      console.error(`Помилка: бот вже запущено (PID ${oldPid}). Зупиніть попередній екземпляр і спробуйте знову.`);
+      process.exit(1);
+    }
+    console.warn(`Знайдено застарілий PID-файл (PID ${oldPid}), видаляємо…`);
+    fs.unlinkSync(PID_FILE);
+  }
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+function releaseLock() {
+  try { fs.unlinkSync(PID_FILE); } catch (_) {}
+}
+
+acquireLock();
 
 // ─── Validate environment variables ──────────────────────────────────────────
 
@@ -1682,5 +1713,5 @@ initDb().then(() => bot.launch()).then(async () => {
   process.exit(1);
 });
 
-process.once('SIGINT',  () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT',  () => { releaseLock(); bot.stop('SIGINT'); });
+process.once('SIGTERM', () => { releaseLock(); bot.stop('SIGTERM'); });
