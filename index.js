@@ -1666,7 +1666,20 @@ bot.on('message', (ctx) => {
 
 // ─── Launch ───────────────────────────────────────────────────────────────────
 
-initDb().then(() => bot.launch({ dropPendingUpdates: true })).then(async () => {
+async function launchBot(attemptsLeft = 5) {
+  try {
+    await bot.launch({ dropPendingUpdates: true });
+  } catch (err) {
+    if (err.response?.error_code === 409 && attemptsLeft > 1) {
+      console.warn(`⚠️ 409 Conflict — попередній екземпляр ще активний. Повтор через 5 с… (залишилось спроб: ${attemptsLeft - 1})`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      return launchBot(attemptsLeft - 1);
+    }
+    throw err;
+  }
+}
+
+initDb().then(() => launchBot()).then(async () => {
   console.log('✅ Telegram-бот запущено!');
   console.log(`🔍 Веб-пошук (Tavily):     ${process.env.TAVILY_API_KEY  ? 'увімкнено' : 'вимкнено'}`);
   console.log(`📋 ClickUp:                ${process.env.CLICKUP_API_KEY ? 'увімкнено' : 'вимкнено'}`);
