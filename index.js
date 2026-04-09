@@ -42,7 +42,8 @@ const MAX_HISTORY = 20;
 const VOICE_CHAR_LIMIT = 300;
 
 // Telegram user ID to send scheduled digests to (set TELEGRAM_USER_ID in .env)
-const OWNER_ID = process.env.TELEGRAM_USER_ID ? parseInt(process.env.TELEGRAM_USER_ID, 10) : null;
+const OWNER_ID = process.env.TELEGRAM_USER_ID ? parseInt(process.env.TELEGRAM_USER_ID.trim(), 10) : null;
+console.log('🔑 OWNER_ID розраховано:', OWNER_ID, '| raw:', process.env.TELEGRAM_USER_ID);
 
 const BASE_SYSTEM_PROMPT = `Ти — Мія, особистий AI-асистент Богдана. Ви працюєте разом вже не перший день, тому спілкування природне і без зайвого формалізму.
 
