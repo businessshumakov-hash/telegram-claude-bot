@@ -1107,6 +1107,7 @@ ${knownFacts}
 }
 
 function startScheduler() {
+  console.log('⏰ startScheduler() викликано');
   if (!OWNER_ID) {
     console.log('⏰ Планувальник вимкнено (TELEGRAM_USER_ID не задано)');
     return;
@@ -1679,7 +1680,12 @@ bot.on('message', (ctx) => {
 
 async function launchBot(attemptsLeft = 5) {
   try {
-    await bot.launch({ dropPendingUpdates: true });
+    // bot.launch() in Telegraf 4.x resolves only when the bot stops —
+    // do NOT await it; fire-and-forget so startup code runs immediately.
+    bot.launch({ dropPendingUpdates: true }).catch(err => {
+      console.error('Помилка polling:', err.message);
+      process.exit(1);
+    });
   } catch (err) {
     if (err.response?.error_code === 409 && attemptsLeft > 1) {
       console.warn(`⚠️ 409 Conflict — попередній екземпляр ще активний. Повтор через 5 с… (залишилось спроб: ${attemptsLeft - 1})`);
@@ -1690,22 +1696,27 @@ async function launchBot(attemptsLeft = 5) {
   }
 }
 
-initDb().then(() => launchBot()).then(async () => {
-  console.log('✅ Telegram-бот запущено!');
-  console.log(`🔍 Веб-пошук (Tavily):     ${process.env.TAVILY_API_KEY  ? 'увімкнено' : 'вимкнено'}`);
-  console.log(`📋 ClickUp:                ${process.env.CLICKUP_API_KEY ? 'увімкнено' : 'вимкнено'}`);
-  console.log(`🎙 Whisper STT (OpenAI):    ${process.env.OPENAI_API_KEY     ? 'увімкнено' : 'вимкнено'}`);
-  console.log(`🔊 ElevenLabs TTS (Anika):  ${process.env.ELEVENLABS_API_KEY ? 'увімкнено' : 'вимкнено'}`);
-  console.log(`👤 Власник (дайджести):     ${OWNER_ID ? `ID ${OWNER_ID}` : 'не задано'}`);
-  const { categories } = await loadMemory();
-  const factCount = CATEGORIES.reduce((s, c) => s + (categories[c]?.length ?? 0), 0);
-  console.log(`🧠 Пам'ять:                 ${factCount} фактів по ${CATEGORIES.length} категоріях (PostgreSQL)`);
-  console.log('Натисніть Ctrl+C для зупинки.');
-  startScheduler();
-}).catch(err => {
-  console.error('Помилка запуску:', err.message);
-  process.exit(1);
-});
+initDb()
+  .then(async () => {
+    await launchBot();
+
+    console.log('✅ Telegram-бот запущено!');
+    console.log(`🔍 Веб-пошук (Tavily):     ${process.env.TAVILY_API_KEY  ? 'увімкнено' : 'вимкнено'}`);
+    console.log(`📋 ClickUp:                ${process.env.CLICKUP_API_KEY ? 'увімкнено' : 'вимкнено'}`);
+    console.log(`🎙 Whisper STT (OpenAI):    ${process.env.OPENAI_API_KEY     ? 'увімкнено' : 'вимкнено'}`);
+    console.log(`🔊 ElevenLabs TTS (Anika):  ${process.env.ELEVENLABS_API_KEY ? 'увімкнено' : 'вимкнено'}`);
+    console.log(`👤 Власник (дайджести):     ${OWNER_ID ? `ID ${OWNER_ID}` : 'не задано'}`);
+    const { categories } = await loadMemory();
+    const factCount = CATEGORIES.reduce((s, c) => s + (categories[c]?.length ?? 0), 0);
+    console.log(`🧠 Пам'ять:                 ${factCount} фактів по ${CATEGORIES.length} категоріях (PostgreSQL)`);
+    console.log('Натисніть Ctrl+C для зупинки.');
+
+    startScheduler();
+  })
+  .catch(err => {
+    console.error('Помилка запуску:', err.message);
+    process.exit(1);
+  });
 
 process.once('SIGINT',  () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
