@@ -1104,17 +1104,22 @@ function startScheduler() {
     return;
   }
 
-  // Minute ticker — scheduled messages
-  setInterval(async () => {
+  // Named tick function — runs every clock minute
+  async function tick() {
     const { hour, minute } = getKyivHourMinute();
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Kyiv' });
+    const hh = String(hour).padStart(2, '0');
+    const mm = String(minute).padStart(2, '0');
+    console.log(`⏰ Tick: ${hh}:${mm} Kyiv | proactive queue: [${proactiveTimes.join(',')}]`);
 
     if (hour === 8 && minute === 0 && lastMorningDate !== today) {
       lastMorningDate = today;
+      console.log('🌅 Запускаю ранковий дайджест...');
       await sendMorningDigest();
     }
     if (hour === 21 && minute === 0 && lastEveningDate !== today) {
       lastEveningDate = today;
+      console.log('🌆 Запускаю вечірній дайджест...');
       await sendEveningDigest();
     }
     if (hour === 22 && minute === 0 && lastMemoryReviewDate !== today) {
@@ -1140,9 +1145,23 @@ function startScheduler() {
       Date.now() - lastProactiveTime >= TWO_HOURS_MS
     ) {
       proactiveTimes = proactiveTimes.filter(t => t !== currentMinute);
+      console.log(`💬 Надсилаю проактивне повідомлення (${nextProactiveType})...`);
       sendProactiveMessage(nextProactiveType).catch(() => {});
     }
-  }, 60_000);
+  }
+
+  // Fire immediately so we don't miss the current minute on startup
+  tick().catch(err => console.error('Scheduler tick error:', err.message));
+
+  // Align to the next clock-minute boundary, then tick every 60s exactly
+  const now = new Date();
+  const msUntilNextMinute = (60 - now.getSeconds()) * 1000 - now.getMilliseconds();
+  console.log(`⏰ Наступний тік через ${Math.round(msUntilNextMinute / 1000)}с (вирівнювання по хвилині)`);
+
+  setTimeout(() => {
+    tick().catch(err => console.error('Scheduler tick error:', err.message));
+    setInterval(() => tick().catch(err => console.error('Scheduler tick error:', err.message)), 60_000);
+  }, msUntilNextMinute);
 
   // 60-minute auto-save of conversation summary
   setInterval(async () => {
