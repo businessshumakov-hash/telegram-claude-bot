@@ -1704,6 +1704,7 @@ initDb().then(() => launchBot()).then(async () => {
   startScheduler();
 }).catch(err => {
   console.error('Помилка запуску:', err.message);
+  console.error('Stack:', err.stack);
   process.exit(1);
 });
 
