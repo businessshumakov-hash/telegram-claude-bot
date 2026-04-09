@@ -42,7 +42,7 @@ const MAX_HISTORY = 20;
 const VOICE_CHAR_LIMIT = 300;
 
 // Telegram user ID to send scheduled digests to (set TELEGRAM_USER_ID in .env)
-const OWNER_ID = process.env.TELEGRAM_USER_ID ? parseInt(process.env.TELEGRAM_USER_ID, 10) : null;
+const OWNER_ID = process.env.TELEGRAM_USER_ID ? parseInt(process.env.TELEGRAM_USER_ID.trim(), 10) : null;
 
 const BASE_SYSTEM_PROMPT = `Ти — Мія, особистий AI-асистент Богдана. Ви працюєте разом вже не перший день, тому спілкування природне і без зайвого формалізму.
 
@@ -1696,27 +1696,25 @@ async function launchBot(attemptsLeft = 5) {
   }
 }
 
-initDb()
-  .then(async () => {
-    await launchBot();
-
-    console.log('✅ Telegram-бот запущено!');
-    console.log(`🔍 Веб-пошук (Tavily):     ${process.env.TAVILY_API_KEY  ? 'увімкнено' : 'вимкнено'}`);
-    console.log(`📋 ClickUp:                ${process.env.CLICKUP_API_KEY ? 'увімкнено' : 'вимкнено'}`);
-    console.log(`🎙 Whisper STT (OpenAI):    ${process.env.OPENAI_API_KEY     ? 'увімкнено' : 'вимкнено'}`);
-    console.log(`🔊 ElevenLabs TTS (Anika):  ${process.env.ELEVENLABS_API_KEY ? 'увімкнено' : 'вимкнено'}`);
-    console.log(`👤 Власник (дайджести):     ${OWNER_ID ? `ID ${OWNER_ID}` : 'не задано'}`);
-    const { categories } = await loadMemory();
-    const factCount = CATEGORIES.reduce((s, c) => s + (categories[c]?.length ?? 0), 0);
-    console.log(`🧠 Пам'ять:                 ${factCount} фактів по ${CATEGORIES.length} категоріях (PostgreSQL)`);
-    console.log('Натисніть Ctrl+C для зупинки.');
-
-    startScheduler();
-  })
-  .catch(err => {
-    console.error('Помилка запуску:', err.message);
-    process.exit(1);
-  });
+=======
+initDb().then(() => launchBot()).then(async () => {
+  console.log('✅ Telegram-бот запущено!');
+  console.log(`🔍 Веб-пошук (Tavily):     ${process.env.TAVILY_API_KEY  ? 'увімкнено' : 'вимкнено'}`);
+  console.log(`📋 ClickUp:                ${process.env.CLICKUP_API_KEY ? 'увімкнено' : 'вимкнено'}`);
+  console.log(`🎙 Whisper STT (OpenAI):    ${process.env.OPENAI_API_KEY     ? 'увімкнено' : 'вимкнено'}`);
+  console.log(`🔊 ElevenLabs TTS (Anika):  ${process.env.ELEVENLABS_API_KEY ? 'увімкнено' : 'вимкнено'}`);
+  console.log(`👤 Власник (дайджести):     ${OWNER_ID ? `ID ${OWNER_ID}` : 'не задано'}`);
+  const { categories } = await loadMemory();
+  const factCount = CATEGORIES.reduce((s, c) => s + (categories[c]?.length ?? 0), 0);
+  console.log(`🧠 Пам'ять:                 ${factCount} фактів по ${CATEGORIES.length} категоріях (PostgreSQL)`);
+  console.log('Натисніть Ctrl+C для зупинки.');
+  startScheduler();
+}).catch(err => {
+  console.error('Помилка запуску:', err.message);
+  console.error('Stack:', err.stack);
+  process.exit(1);
+});
+2960e49235008ff56b4a94e25d2b22efc8006302
 
 process.once('SIGINT',  () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
