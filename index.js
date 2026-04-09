@@ -212,8 +212,9 @@ async function mergeAndSaveFacts(newCategorized) {
   for (const cat of CATEGORIES) {
     const incoming = newCategorized[cat] ?? [];
     if (!incoming.length) continue;
-    const existing = new Set((categories[cat] ?? []).map(f => f.toLowerCase()));
+    const existing = new Set((categories[cat] ?? []).filter(f => typeof f === 'string').map(f => f.toLowerCase()));
     for (const fact of incoming) {
+      if (typeof fact !== 'string') continue;
       if (!existing.has(fact.toLowerCase())) {
         categories[cat] = [...(categories[cat] ?? []), fact];
         changed = true;
@@ -1501,7 +1502,7 @@ bot.command('forget', async (ctx) => {
   const newCategories = {};
   for (const cat of CATEGORIES) {
     const before = (categories[cat] ?? []).length;
-    newCategories[cat] = (categories[cat] ?? []).filter(f => !f.toLowerCase().includes(keyword));
+    newCategories[cat] = (categories[cat] ?? []).filter(f => typeof f !== 'string' || !f.toLowerCase().includes(keyword));
     removed += before - newCategories[cat].length;
   }
   if (removed === 0) {
