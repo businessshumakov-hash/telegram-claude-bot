@@ -462,13 +462,20 @@ ${knownFacts}
     });
 
     const raw = response.content[0]?.text?.trim() ?? '{}';
-    const match = raw.match(/\{[\s\S]*\}/);
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
     if (!match) {
       console.warn('🧠 Екстракція: не вдалося розібрати відповідь:', raw.slice(0, 100));
       return;
     }
 
-    const newFacts = JSON.parse(match[0]);
+    let newFacts;
+    try {
+      newFacts = JSON.parse(match[0]);
+    } catch (parseErr) {
+      console.warn('🧠 Екстракція: помилка парсингу JSON:', parseErr.message, '| raw:', raw.slice(0, 200));
+      return;
+    }
     const total = CATEGORIES.reduce((s, c) => s + (newFacts[c]?.length ?? 0), 0);
     if (!total) {
       console.log('🧠 Екстракція: нових фактів не знайдено');
@@ -1131,9 +1138,13 @@ function startScheduler() {
     // Rebuild proactive schedule at day rollover (or first tick)
     if (proactiveScheduleDate !== today) {
       proactiveScheduleDate = today;
-      proactiveTimes = scheduleTodayProactiveMessages();
       const fmt = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-      console.log(`💬 Проактивні повідомлення сьогодні: ${proactiveTimes.map(fmt).join(', ')}`);
+      const allTimes = scheduleTodayProactiveMessages();
+      // Drop times already in the past so mid-day restarts (Railway) still fire messages
+      proactiveTimes = allTimes.filter(t => t > currentMinute);
+      console.log(`💬 Проактивні повідомлення сьогодні (всі): ${allTimes.map(fmt).join(', ')}`);
+      console.log(`💬 Проактивні повідомлення (ще попереду): ${proactiveTimes.length ? proactiveTimes.map(fmt).join(', ') : 'немає — всі вже минули, нові з завтра'}`);
+      console.log(`💬 Поточний час Київ: ${hh}:${mm} | Тип наступного: ${nextProactiveType} | Остання відправка: ${lastProactiveTime ? new Date(lastProactiveTime).toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kyiv' }) : 'ніколи'}`);
     }
 
     // Fire a proactive message if the current minute is scheduled and
